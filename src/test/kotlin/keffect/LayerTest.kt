@@ -6,6 +6,7 @@ import kotlin.test.assertEquals
 import kotlin.time.Duration.Companion.milliseconds
 
 class LayerTest {
+    private val boom = IllegalStateException("boom")
     private val log = mutableListOf<String>()
     private fun record(line: String) = Effect.sync { log += line }
 
@@ -83,6 +84,15 @@ class LayerTest {
         val eff: UIO<Int> = Effect.succeed(1)
         assertEquals(1, eff.provide(resource("a")).run())
         assertEquals(listOf("acquire a", "release a ok"), log)
+    }
+
+    @Test
+    fun `a shared layer whose build died fails every reference with the same defect`() = runTest {
+        val shared: Layer<Any?, Nothing, String> = Layer.effect(Effect.die(boom))
+        // The first reference recovers, so the second one gets the memoized failure.
+        val first = Layer.effect(effect<Any?, Nothing, String> { shared.bind() }.catchAllCause { Effect.succeed("recovered") })
+        val app = first.zipWith(Layer.gen<Any?, Nothing, String> { shared.bind() }) { a, b -> a + b }
+        assertEquals(Exit.Failure(Cause.Die(boom)), use.provide(app).runExit())
     }
 
     @Test

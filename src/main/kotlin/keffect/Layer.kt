@@ -1,5 +1,6 @@
 package keffect
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import java.util.concurrent.ConcurrentHashMap
 
@@ -21,18 +22,21 @@ class Layer<in RIn, out E, out ROut> @PublishedApi internal constructor(
      */
     internal fun build(): Effect<RIn, E, ROut> = Effect { env ->
         val memo = memoMaps.current() ?: return@Effect builder.unsafeRun(env)
-        val fresh = CompletableDeferred<Any?>()
+        val fresh = CompletableDeferred<Exit<*, *>>()
         val existing = memo.builds.putIfAbsent(this, fresh)
         if (existing != null) {
             @Suppress("UNCHECKED_CAST")
-            return@Effect existing.await() as ROut
+            return@Effect existing.await().getOrRaise() as ROut
         }
-        try {
-            builder.unsafeRun(env).also { fresh.complete(it) }
-        } catch (t: Throwable) {
-            fresh.completeExceptionally(t)
-            throw t
+        // Shared as a value: awaiting a failed Deferred would rethrow a copy of a defect.
+        val exit = try {
+            builder.runToExit(env)
+        } catch (c: CancellationException) {
+            fresh.completeExceptionally(c)
+            throw c
         }
+        fresh.complete(exit)
+        exit.getOrRaise()
     }
 
     override fun toString() = "Layer(${name ?: "anonymous"})"
@@ -54,7 +58,7 @@ class Layer<in RIn, out E, out ROut> @PublishedApi internal constructor(
 private val memoMaps = ContextSlot<MemoMap>()
 
 private class MemoMap {
-    val builds = ConcurrentHashMap<Layer<*, *, *>, CompletableDeferred<Any?>>()
+    val builds = ConcurrentHashMap<Layer<*, *, *>, CompletableDeferred<Exit<*, *>>>()
 }
 
 // ---- Composition ---------------------------------------------------------------

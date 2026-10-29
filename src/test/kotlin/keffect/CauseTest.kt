@@ -105,6 +105,12 @@ class CauseTest {
     }
 
     @Test
+    fun `timeoutFail keeps a null that arrived in time`() {
+        val eff: IO<String, Int?> = Effect.succeed<Int?>(null).timeoutFail(1.seconds) { "slow" }
+        assertEquals(Exit.Success(null), eff.runBlockingExit())
+    }
+
+    @Test
     fun `attempt and fromNullable produce typed errors`() {
         assertEquals(Exit.Failure(Cause.Fail("boom")), Effect.attempt({ it.message!! }) { throw boom }.runBlockingExit())
         assertEquals(Exit.Failure(Cause.Fail("null")), Effect.fromNullable(null as Int?) { "null" }.runBlockingExit())

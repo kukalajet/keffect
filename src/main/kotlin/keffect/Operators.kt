@@ -136,8 +136,8 @@ fun <R, E, A> Effect<R, E, A>.timeout(duration: Duration): Effect<R, E, A?> = Ef
 
 /** `Effect.timeoutFail` */
 fun <R, E, A> Effect<R, E, A>.timeoutFail(duration: Duration, onTimeout: () -> E): Effect<R, E, A> = Effect { env ->
-    val box = crossing({ withTimeoutOrNull(duration) { Box(it()) } }) { unsafeRun(env) }
-    box?.value ?: raise(Cause.Fail(onTimeout()))
+    val box = crossing({ withTimeoutOrNull(duration) { Box(it()) } }) { unsafeRun(env) } ?: raise(Cause.Fail(onTimeout()))
+    box.value
 }
 
 /** Measure how long the effect takes. */
