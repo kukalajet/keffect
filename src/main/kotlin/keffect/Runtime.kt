@@ -11,9 +11,6 @@ suspend fun <E, A> Effect<Any?, E, A>.runExit(): Exit<E, A> =
         asFiber { scopedExit { unsafeRun(Unit) } }
     } catch (c: CancellationException) {
         interruptedExit(c)
-    } catch (t: Throwable) {
-        // A failing finalizer while closing the root scope.
-        Exit.Failure(Cause.Die(t))
     }
 
 /** `Effect.runPromise` — run and return the value, or throw [FiberFailure]. */

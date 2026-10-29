@@ -64,7 +64,7 @@ Typealiases: `IO<E, A>` (no requirements), `UIO<A>` (no requirements, can't fail
 | `Effect.retry / repeat / schedule` | same; `retry(times = 3)` |
 | `Effect.runPromise / runPromiseExit` | `run() / runExit()` (suspend) |
 | `Effect.runSync` | `runBlocking() / runBlockingExit()` |
-| `Exit`, `Cause.Fail / Die / Interrupt` | same |
+| `Exit`, `Cause.Fail / Die / Interrupt / Parallel / Sequential` | `Exit`, `Cause.Fail / Die / Interrupt / Both / Then` |
 | `Effect.log` | `Effect.log` (println with fiber id by default) |
 | `Logger.replace` | `eff.withLogger { level, message, fiberId -> ... }` |
 | `Effect.withClock` | `eff.withClock(timeSource)` (e.g. `testTimeSource` under `runTest`) |
@@ -74,6 +74,8 @@ Typealiases: `IO<E, A>` (no requirements), `UIO<A>` (no requirements, can't fail
 * An `Effect` wraps `suspend (R) -> A`. Nothing runs until `run*`.
 * Typed errors travel as an internal stackless exception and become `Cause.Fail`.
   Other exceptions are defects (`Cause.Die`); `CancellationException` is interruption.
+* Finalizers (`ensuring`, `onExit`, releases, scope close) run uninterruptibly, whatever happened.
+  A failing finalizer never hides the outcome: it becomes `Cause.Then(outcome, finalizerFailure)`.
 * Fibers are coroutines. Like Effect-TS, `fork` is supervised by the parent *fiber*:
   children are interrupted when the parent finishes. `forkDaemon` outlives it.
 * `Scope` and the layer memo map live in the coroutine context.

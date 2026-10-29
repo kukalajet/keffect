@@ -1,9 +1,11 @@
 package keffect
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import kotlin.time.Duration
 
@@ -114,11 +116,15 @@ sealed interface Cause<out E> {
     /** Both sides failed (e.g. in `race`). */
     data class Both<out E>(val left: Cause<E>, val right: Cause<E>) : Cause<E>
 
+    /** [first] happened, then [second] (e.g. a finalizer failed after the effect did). */
+    data class Then<out E>(val first: Cause<E>, val second: Cause<E>) : Cause<E>
+
     fun pretty(): String = when (this) {
         is Fail -> "Fail($error)"
         is Die -> "Die(${defect::class.simpleName}: ${defect.message})"
         Interrupt -> "Interrupt"
         is Both -> "Both(${left.pretty()}, ${right.pretty()})"
+        is Then -> "Then(${first.pretty()}, ${second.pretty()})"
     }
 }
 
@@ -149,8 +155,9 @@ class FiberFailure(val effectCause: Cause<*>) : RuntimeException(
 //
 // A running effect reports failure by throwing. This section is the only code that
 // knows how: [raise] turns a Cause into a throw, [exitOf] turns a throw back into
-// a Cause, and the round trip is lossless. Everything else speaks Cause/Exit.
-//  - Fail and Both travel inside a [CauseFailure],
+// a Cause, and the round trip is lossless. [guarantee] is the one place that runs
+// finalizers and decides how their failures combine. Everything else speaks Cause/Exit.
+//  - Fail, Both and Then travel inside a [CauseFailure],
 //  - Die is the defect itself, so it keeps its stack trace and type,
 //  - Interrupt is a CancellationException, because that is how coroutines cancel.
 // ---------------------------------------------------------------------------
@@ -183,8 +190,33 @@ internal suspend fun <R, E, A> Effect<R, E, A>.runToExit(env: R): Exit<E, A> = e
 internal fun raise(cause: Cause<*>): Nothing = when (cause) {
     is Cause.Die -> throw cause.defect
     Cause.Interrupt -> throw CancellationException("Interrupted")
-    is Cause.Fail, is Cause.Both -> throw CauseFailure(cause)
+    is Cause.Fail, is Cause.Both, is Cause.Then -> throw CauseFailure(cause)
 }
+
+/**
+ * Run [block], then [finalizer] with its outcome, uninterruptibly, whatever happened.
+ *
+ * Interruption of [block] is captured as [Cause.Interrupt] (raising the result keeps it
+ * propagating). A failing finalizer never hides the outcome: it is appended to it as
+ * `Then(outcome, finalizerFailure)`, or replaces a success.
+ */
+internal suspend fun <E, A> guarantee(block: suspend () -> A, finalizer: suspend (Exit<E, A>) -> Unit): Exit<E, A> {
+    val exit = try {
+        exitOf<E, A>(block)
+    } catch (c: CancellationException) {
+        Exit.Failure(Cause.Interrupt)
+    }
+    val failed = finalizerFailure { finalizer(exit) } ?: return exit
+    return Exit.Failure(if (exit is Exit.Failure) Cause.Then(exit.cause, failed) else failed)
+}
+
+/** Run a finalizer uninterruptibly and return how it failed, if it did. */
+internal suspend fun finalizerFailure(finalizer: suspend () -> Unit): Cause<Nothing>? =
+    withContext(NonCancellable) {
+        // Under NonCancellable, a cancellation can only come from the finalizer itself.
+        val exit = try { exitOf<Nothing, Unit>(finalizer) } catch (c: CancellationException) { Exit.Failure(Cause.Interrupt) }
+        (exit as? Exit.Failure)?.cause
+    }
 
 /**
  * The primitive every error operator is built on: continue with [onFailure] or [onSuccess]
@@ -205,6 +237,7 @@ internal fun <E> Cause<E>.failureOrCause(): Either<E, Cause<Nothing>> {
     fun firstFail(c: Cause<E>): Cause.Fail<E>? = when (c) {
         is Cause.Fail -> c
         is Cause.Both -> firstFail(c.left) ?: firstFail(c.right)
+        is Cause.Then -> firstFail(c.first) ?: firstFail(c.second)
         else -> null
     }
     @Suppress("UNCHECKED_CAST")
@@ -217,6 +250,7 @@ internal fun <E, E2> Cause<E>.mapFail(f: (E) -> E2): Cause<E2> = when (this) {
     is Cause.Die -> this
     Cause.Interrupt -> Cause.Interrupt
     is Cause.Both -> Cause.Both(left.mapFail(f), right.mapFail(f))
+    is Cause.Then -> Cause.Then(first.mapFail(f), second.mapFail(f))
 }
 
 @PublishedApi

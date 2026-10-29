@@ -1,6 +1,5 @@
 package keffect
 
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.sync.Mutex
@@ -28,23 +27,15 @@ class Scope internal constructor() {
         if (runNow) withContext(NonCancellable) { finalizer(Exit.Failure(Cause.Interrupt)) }
     }
 
-    /** Run all finalizers (last acquired, first released). Errors in finalizers become defects. */
+    /** Run every finalizer (last acquired, first released), then raise their failures, in that order. */
     internal suspend fun close(exit: Exit<*, *>) {
         val toRun = lock.withLock {
             closed = true
             finalizers.toList().also { finalizers.clear() }
         }
-        withContext(NonCancellable) {
-            var firstError: Throwable? = null
-            for (f in toRun) {
-                try {
-                    f(exit)
-                } catch (t: Throwable) {
-                    if (firstError == null) firstError = t
-                }
-            }
-            firstError?.let { throw it }
-        }
+        toRun.mapNotNull { f -> finalizerFailure { f(exit) } }
+            .reduceOrNull<Cause<Nothing>, Cause<Nothing>> { a, b -> Cause.Then(a, b) }
+            ?.let { raise(it) }
     }
 }
 
@@ -56,20 +47,13 @@ private suspend fun currentScope(): Scope =
     currentCoroutineContext()[ScopeElement]?.scope
         ?: error("No Scope in context. Run the effect with run*/runBlocking, or wrap it in Effect.scoped { }.")
 
-/**
- * Run [block] in a fresh scope, close the scope with the outcome, and return that outcome.
- * A failing finalizer is thrown; interruption closes the scope and keeps propagating.
- */
+/** Run [block] in a fresh scope, close the scope with the outcome, and return the outcome (see [guarantee]). */
 internal suspend fun <E, T> scopedExit(block: suspend () -> T): Exit<E, T> {
     val scope = Scope()
-    val exit = try {
-        withContext(ScopeElement(scope)) { exitOf<E, T>(block) }
-    } catch (c: CancellationException) {
-        scope.close(Exit.Failure(Cause.Interrupt))
-        throw c
+    // Capture the outcome inside the scope's context: a defect rethrown across `withContext` may be copied.
+    return guarantee({ withContext(ScopeElement(scope)) { exitOf<E, T>(block) }.getOrRaise() }) { exit: Exit<E, T> ->
+        scope.close(exit)
     }
-    scope.close(exit)
-    return exit
 }
 
 /** [scopedExit], re-raising the failure inside the running effect. */
@@ -116,14 +100,7 @@ fun <R, E, A, B> Effect.Companion.acquireUseRelease(
     release: (A, Exit<E, B>) -> Effect<R, Nothing, *>,
 ): Effect<R, E, B> = Effect { env ->
     val resource = withContext(NonCancellable) { acquire.unsafeRun(env) }
-    val exit = try {
-        use(resource).runToExit(env)
-    } catch (c: CancellationException) {
-        withContext(NonCancellable) { release(resource, Exit.Failure(Cause.Interrupt)).unsafeRun(env) }
-        throw c
-    }
-    withContext(NonCancellable) { release(resource, exit).unsafeRun(env) }
-    exit.getOrRaise()
+    guarantee({ use(resource).unsafeRun(env) }) { exit: Exit<E, B> -> release(resource, exit).unsafeRun(env) }.getOrRaise()
 }
 
 /** `Effect.forkScoped` — a fiber that lives as long as the current scope, not the current fiber. */

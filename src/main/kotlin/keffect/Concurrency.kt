@@ -1,6 +1,7 @@
 package keffect
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
@@ -10,6 +11,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -58,27 +60,27 @@ internal suspend fun <T> asFiber(id: Int = fiberIds.incrementAndGet(), block: su
     }
 }
 
-/** A handle to a running effect. */
+/**
+ * A handle to a running effect.
+ *
+ * The outcome is handed over through [exit] rather than as the result of [job]: a cancelled
+ * coroutine discards its result, which would lose e.g. a finalizer that failed during interruption.
+ */
 class Fiber<out E, out A> internal constructor(
     val id: Int,
-    private val deferred: Deferred<Exit<E, A>>,
+    private val job: Job,
+    private val exit: Deferred<Exit<E, A>>,
 ) {
     /** Wait for the fiber and get its outcome as a value. */
-    val await: Effect<Any?, Nothing, Exit<E, A>> = Effect { awaitExit() }
+    val await: Effect<Any?, Nothing, Exit<E, A>> = Effect { exit.await() }
 
     /** Wait for the fiber; its failure becomes our failure. */
-    val join: Effect<Any?, E, A> = Effect { awaitExit().getOrRaise() }
+    val join: Effect<Any?, E, A> = Effect { exit.await().getOrRaise() }
 
     /** Interrupt the fiber and wait for it to finish its finalizers. */
     val interrupt: Effect<Any?, Nothing, Exit<E, A>> = Effect {
-        deferred.cancelAndJoin()
-        awaitExit()
-    }
-
-    private suspend fun awaitExit(): Exit<E, A> = try {
-        deferred.await()
-    } catch (c: CancellationException) {
-        if (deferred.isCancelled) Exit.Failure(Cause.Interrupt) else throw c
+        job.cancelAndJoin()
+        exit.await()
     }
 
     override fun toString() = "Fiber#$id"
@@ -90,17 +92,22 @@ private suspend fun <R, E, A> startFiber(effect: Effect<R, E, A>, env: R, daemon
     // but we register it with the parent fiber so it is interrupted when the parent ends.
     val scope = CoroutineScope(ctx.minusKey(Job).minusKey(FiberContext) + Job())
     val id = fiberIds.incrementAndGet()
-    val deferred = scope.async {
+    val exit = CompletableDeferred<Exit<E, A>>()
+    val job = scope.launch {
         asFiber(id) {
-            try {
-                effect.runToExit(env)
-            } catch (c: CancellationException) {
-                Exit.Failure(Cause.Interrupt)
-            }
+            exit.complete(
+                try {
+                    effect.runToExit(env)
+                } catch (c: CancellationException) {
+                    Exit.Failure(Cause.Interrupt)
+                },
+            )
         }
     }
-    if (!daemon) ctx[FiberContext]?.supervise(deferred)
-    return Fiber(id, deferred)
+    // Interrupted before it started: there is no other outcome.
+    job.invokeOnCompletion { exit.complete(Exit.Failure(Cause.Interrupt)) }
+    if (!daemon) ctx[FiberContext]?.supervise(job)
+    return Fiber(id, job, exit)
 }
 
 /** Start [block] as a child fiber of this structured scope: it fails with the scope and is joined by it. */
