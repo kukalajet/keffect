@@ -3,6 +3,7 @@ package keffect
 import kotlin.random.Random
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.ZERO
+import kotlin.time.TimeMark
 
 /**
  * `Schedule` — decides whether to go again and how long to wait.
@@ -83,25 +84,34 @@ fun <I> Schedule<I>.onDecision(f: (attempt: Int, input: I, delay: Duration?) -> 
 
 // ---- Using schedules -----------------------------------------------------------
 
-// Note: inside extensions on Effect, a bare `delay(...)` would resolve to Effect.delay,
-// so the coroutine delay is always called fully qualified here.
-private suspend fun pause(wait: Duration) {
-    if (wait.isPositive()) kotlinx.coroutines.delay(wait) else kotlinx.coroutines.yield() // stay fair on zero delays
+/**
+ * One run of a schedule: tracks the attempt number and the time since the start, and
+ * does the waiting. [next] waits as the schedule says and returns `true`, or returns
+ * `false` once the schedule is done.
+ */
+private class Recurrence<in I>(private val schedule: Schedule<I>, private val start: TimeMark) {
+    private var attempt = 1
+
+    suspend fun next(input: I): Boolean {
+        val wait = schedule.next(attempt++, input, start.elapsedNow()) ?: return false
+        // Inside extensions on Effect, a bare `delay(...)` resolves to Effect.delay, hence the qualified name.
+        if (wait.isPositive()) kotlinx.coroutines.delay(wait) else kotlinx.coroutines.yield() // stay fair on zero delays
+        return true
+    }
 }
+
+private suspend fun <I> Schedule<I>.start(): Recurrence<I> = Recurrence(this, currentTimeSource().markNow())
 
 /** `Effect.retry(schedule)` — retry on *typed* failures. Defects and interruption are not retried. */
 fun <R, E, A> Effect<R, E, A>.retry(schedule: Schedule<E>): Effect<R, E, A> = Effect { env ->
-    val start = currentTimeSource().markNow()
-    var attempt = 1
+    val recurrence = schedule.start()
     while (true) {
         val cause = when (val exit = runToExit(env)) {
             is Exit.Success -> return@Effect exit.value
             is Exit.Failure -> exit.cause
         }
         val error = cause.failureOrCause() as? Either.Left ?: raise(cause)
-        val wait = schedule.next(attempt, error.value, start.elapsedNow()) ?: raise(cause)
-        pause(wait)
-        attempt++
+        if (!recurrence.next(error.value)) raise(cause)
     }
     @Suppress("UNREACHABLE_CODE")
     error("unreachable")
@@ -112,27 +122,14 @@ fun <R, E, A> Effect<R, E, A>.retry(times: Int): Effect<R, E, A> = retry(Schedul
 
 /** `Effect.repeat(schedule)` — run once, then again while the schedule continues. Returns the last value. */
 fun <R, E, A> Effect<R, E, A>.repeat(schedule: Schedule<A>): Effect<R, E, A> = Effect { env ->
-    val start = currentTimeSource().markNow()
-    var attempt = 1
+    val recurrence = schedule.start()
     var last = unsafeRun(env)
-    while (true) {
-        val wait = schedule.next(attempt, last, start.elapsedNow()) ?: return@Effect last
-        pause(wait)
-        last = unsafeRun(env)
-        attempt++
-    }
-    @Suppress("UNREACHABLE_CODE")
+    while (recurrence.next(last)) last = unsafeRun(env)
     last
 }
 
 /** `Effect.schedule` — run repeatedly in the background-friendly form: first run *after* the first delay. */
 fun <R, E, A> Effect<R, E, A>.schedule(schedule: Schedule<Any?>): Effect<R, E, Unit> = Effect { env ->
-    val start = currentTimeSource().markNow()
-    var attempt = 1
-    while (true) {
-        val wait = schedule.next(attempt, Unit, start.elapsedNow()) ?: return@Effect
-        pause(wait)
-        unsafeRun(env)
-        attempt++
-    }
+    val recurrence = schedule.start()
+    while (recurrence.next(Unit)) unsafeRun(env)
 }
