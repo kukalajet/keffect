@@ -1,6 +1,5 @@
 package keffect
 
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -111,24 +110,12 @@ fun <R, E, A> Effect<R, E, A>.filterOrFail(predicate: (A) -> Boolean, error: (A)
 // ---- Finalization ------------------------------------------------------------
 
 /** `Effect.ensuring` — always run [finalizer], even on failure or interruption. */
-fun <R, E, A> Effect<R, E, A>.ensuring(finalizer: Effect<R, Nothing, *>): Effect<R, E, A> = Effect { env ->
-    try {
-        unsafeRun(env)
-    } finally {
-        withContext(NonCancellable) { finalizer.unsafeRun(env) }
-    }
-}
+fun <R, E, A> Effect<R, E, A>.ensuring(finalizer: Effect<R, Nothing, *>): Effect<R, E, A> =
+    onExit { finalizer }
 
 /** `Effect.onExit` — run [f] with the outcome, uninterruptibly. */
 fun <R, E, A> Effect<R, E, A>.onExit(f: (Exit<E, A>) -> Effect<R, Nothing, *>): Effect<R, E, A> = Effect { env ->
-    val exit = try {
-        runToExit(env)
-    } catch (c: CancellationException) {
-        withContext(NonCancellable) { f(Exit.Failure(Cause.Interrupt)).unsafeRun(env) }
-        throw c
-    }
-    withContext(NonCancellable) { f(exit).unsafeRun(env) }
-    exit.getOrRaise()
+    guarantee({ unsafeRun(env) }) { exit: Exit<E, A> -> f(exit).unsafeRun(env) }.getOrRaise()
 }
 
 fun <R, E, A> Effect<R, E, A>.onInterrupt(f: Effect<R, Nothing, *>): Effect<R, E, A> =
