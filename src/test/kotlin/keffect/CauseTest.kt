@@ -53,6 +53,15 @@ class CauseTest {
     }
 
     @Test
+    fun `catchSome and tapError re-raise the whole composite cause`() {
+        val seen = mutableListOf<String>()
+        val both = Exit.Failure(Cause.Both(Cause.Fail("L"), Cause.Fail("R")))
+        assertEquals(both, bothFail.catchSome { null }.runBlockingExit())
+        assertEquals(both, bothFail.tapError { e -> Effect.sync { seen += e } }.runBlockingExit())
+        assertEquals(listOf("L"), seen)
+    }
+
+    @Test
     fun `either moves typed errors into the success channel`() {
         assertEquals(Either.Left("e"), Effect.fail("e").either().runBlocking())
         assertEquals(Either.Right(1), Effect.succeed(1).either().runBlocking())
