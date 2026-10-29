@@ -15,7 +15,7 @@ import kotlin.coroutines.CoroutineContext
  * context instead: every `run*` call opens a root scope, and [Effect.Companion.scoped]
  * opens a nested one. Simpler, at the price of not being visible in the type.
  */
-class Scope internal constructor() {
+internal class Scope {
     private val lock = Mutex()
     private val finalizers = ArrayDeque<suspend (Exit<*, *>) -> Unit>()
     private var closed = false
