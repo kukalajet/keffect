@@ -45,14 +45,22 @@ fun <R, E, A> Effect<R, E, A>.delay(duration: Duration): Effect<R, E, A> =
 fun <R, E, E2, A> Effect<R, E, A>.mapError(f: (E) -> E2): Effect<R, E2, A> =
     foldCause({ Effect.failCause(it.mapFail(f)) }, { Effect.succeed(it) })
 
-/** `Effect.catchAll` — recover from every typed error. Defects and interruption pass through. */
-fun <R, E, E2, A> Effect<R, E, A>.catchAll(f: (E) -> Effect<R, E2, A>): Effect<R, E2, A> =
+/**
+ * The primitive the typed-error operators share: on a failure holding a typed error, continue
+ * with [f] given the first such error and the whole cause. Failures without one (defects,
+ * interruption) pass through, which is why they fit any error type [E2].
+ */
+private fun <R, E, E2, A> Effect<R, E, A>.catchFailure(f: (E, Cause<E>) -> Effect<R, E2, A>): Effect<R, E2, A> =
     foldCause({ cause ->
         when (val e = cause.failureOrCause()) {
-            is Either.Left -> f(e.value)
+            is Either.Left -> f(e.value, cause)
             is Either.Right -> Effect.failCause(e.value)
         }
     }, { Effect.succeed(it) })
+
+/** `Effect.catchAll` — recover from every typed error. Defects and interruption pass through. */
+fun <R, E, E2, A> Effect<R, E, A>.catchAll(f: (E) -> Effect<R, E2, A>): Effect<R, E2, A> =
+    catchFailure { e, _ -> f(e) }
 
 /**
  * `Effect.catchSome` / `catchTag` — recover from some errors. Return `null` to re-raise.
@@ -62,12 +70,7 @@ fun <R, E, E2, A> Effect<R, E, A>.catchAll(f: (E) -> Effect<R, E2, A>): Effect<R
  * ```
  */
 fun <R, E, A> Effect<R, E, A>.catchSome(f: (E) -> Effect<R, E, A>?): Effect<R, E, A> =
-    foldCause({ cause ->
-        when (val e = cause.failureOrCause()) {
-            is Either.Left -> f(e.value) ?: Effect.failCause(cause)
-            is Either.Right -> Effect.failCause(cause)
-        }
-    }, { Effect.succeed(it) })
+    catchFailure { e, cause -> f(e) ?: Effect.failCause(cause) }
 
 /** Recover from one specific error subtype: `eff.catchTag<UserError.NotFound, _, _, _> { ... }` is ugly in
  *  Kotlin, so this takes the class instead: `eff.catchTag(UserError.NotFound::class) { ... }`. */
@@ -96,12 +99,7 @@ fun <R, E, A> Effect<R, E, A>.either(): Effect<R, Nothing, Either<E, A>> =
 fun <R, E, A> Effect<R, E, A>.exit(): Effect<R, Nothing, Exit<E, A>> = Effect { env -> runToExit(env) }
 
 fun <R, E, A> Effect<R, E, A>.tapError(f: (E) -> Effect<R, Nothing, *>): Effect<R, E, A> =
-    foldCause({ cause ->
-        when (val e = cause.failureOrCause()) {
-            is Either.Left -> f(e.value).andThen(Effect.failCause(cause))
-            is Either.Right -> Effect.failCause(cause)
-        }
-    }, { Effect.succeed(it) })
+    catchFailure { e, cause -> f(e).andThen(Effect.failCause(cause)) }
 
 /** Fail with [error] when [predicate] does not hold. */
 fun <R, E, A> Effect<R, E, A>.filterOrFail(predicate: (A) -> Boolean, error: (A) -> E): Effect<R, E, A> =
