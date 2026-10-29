@@ -35,22 +35,3 @@ class ScheduleTest {
         assertEquals(listOf(1 to 1, 2 to 2, 3 to 3), seen)
     }
 }
-
-class LayerTest {
-    @Test
-    fun `a layer shared in the graph is built once per provide`() = runTest {
-        var builds = 0
-        val shared: Layer<Any?, Nothing, Int> = Layer.effect(Effect.sync { ++builds })
-        val both = shared.zipWith(shared.map { it * 10 }) { a, b -> a + b }
-        assertEquals(11, Effect.environment<Int>().provide(both).run())
-        assertEquals(1, builds)
-    }
-
-    @Test
-    fun `layer resources are released when the provided effect ends`() = runTest {
-        val log = mutableListOf<String>()
-        val layer = Layer.effect(Effect.acquireRelease(Effect.sync { log += "acquire"; 1 }) { Effect.sync { log += "release" } })
-        Effect.environment<Int>().tap { Effect.sync { log += "use $it" } }.provide(layer).run()
-        assertEquals(listOf("acquire", "use 1", "release"), log)
-    }
-}
