@@ -95,14 +95,14 @@ fun <R, E, A> Effect<R, E, A>.retry(schedule: Schedule<E>): Effect<R, E, A> = Ef
     val start = TimeSource.Monotonic.markNow()
     var attempt = 1
     while (true) {
-        try {
-            return@Effect unsafeRun(env)
-        } catch (f: TypedFailure) {
-            @Suppress("UNCHECKED_CAST")
-            val wait = schedule.next(attempt, f.error as E, start.elapsedNow()) ?: throw f
-            pause(wait)
-            attempt++
+        val cause = when (val exit = runToExit(env)) {
+            is Exit.Success -> return@Effect exit.value
+            is Exit.Failure -> exit.cause
         }
+        val error = cause.failureOrCause() as? Either.Left ?: raise(cause)
+        val wait = schedule.next(attempt, error.value, start.elapsedNow()) ?: raise(cause)
+        pause(wait)
+        attempt++
     }
     @Suppress("UNREACHABLE_CODE")
     error("unreachable")

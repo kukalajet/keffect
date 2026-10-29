@@ -43,24 +43,17 @@ fun <R, E, A> Effect<R, E, A>.delay(duration: Duration): Effect<R, E, A> =
 
 // ---- Error handling ----------------------------------------------------------
 
-fun <R, E, E2, A> Effect<R, E, A>.mapError(f: (E) -> E2): Effect<R, E2, A> = Effect { env ->
-    try {
-        unsafeRun(env)
-    } catch (t: TypedFailure) {
-        @Suppress("UNCHECKED_CAST")
-        throw TypedFailure(f(t.error as E))
-    }
-}
+fun <R, E, E2, A> Effect<R, E, A>.mapError(f: (E) -> E2): Effect<R, E2, A> =
+    foldCause({ Effect.failCause(it.mapFail(f)) }, { Effect.succeed(it) })
 
 /** `Effect.catchAll` — recover from every typed error. Defects and interruption pass through. */
-fun <R, E, E2, A> Effect<R, E, A>.catchAll(f: (E) -> Effect<R, E2, A>): Effect<R, E2, A> = Effect { env ->
-    try {
-        unsafeRun(env)
-    } catch (t: TypedFailure) {
-        @Suppress("UNCHECKED_CAST")
-        f(t.error as E).unsafeRun(env)
-    }
-}
+fun <R, E, E2, A> Effect<R, E, A>.catchAll(f: (E) -> Effect<R, E2, A>): Effect<R, E2, A> =
+    foldCause({ cause ->
+        when (val e = cause.failureOrCause()) {
+            is Either.Left -> f(e.value)
+            is Either.Right -> Effect.failCause(e.value)
+        }
+    }, { Effect.succeed(it) })
 
 /**
  * `Effect.catchSome` / `catchTag` — recover from some errors. Return `null` to re-raise.
@@ -69,15 +62,13 @@ fun <R, E, E2, A> Effect<R, E, A>.catchAll(f: (E) -> Effect<R, E2, A>): Effect<R
  * eff.catchSome { e -> if (e is UserError.NotFound) Effect.succeed(Guest) else null }
  * ```
  */
-fun <R, E, A> Effect<R, E, A>.catchSome(f: (E) -> Effect<R, E, A>?): Effect<R, E, A> = Effect { env ->
-    try {
-        unsafeRun(env)
-    } catch (t: TypedFailure) {
-        @Suppress("UNCHECKED_CAST")
-        val handler = f(t.error as E) ?: throw t
-        handler.unsafeRun(env)
-    }
-}
+fun <R, E, A> Effect<R, E, A>.catchSome(f: (E) -> Effect<R, E, A>?): Effect<R, E, A> =
+    foldCause({ cause ->
+        when (val e = cause.failureOrCause()) {
+            is Either.Left -> f(e.value) ?: Effect.failCause(cause)
+            is Either.Right -> Effect.failCause(cause)
+        }
+    }, { Effect.succeed(it) })
 
 /** Recover from one specific error subtype: `eff.catchTag<UserError.NotFound, _, _, _> { ... }` is ugly in
  *  Kotlin, so this takes the class instead: `eff.catchTag(UserError.NotFound::class) { ... }`. */
@@ -87,52 +78,35 @@ fun <R, E, A, T : Any> Effect<R, E, A>.catchTag(
 ): Effect<R, E, A> = catchSome { e -> if (tag.isInstance(e)) f(tag.java.cast(e)) else null }
 
 /** Also intercept defects. */
-fun <R, E, A> Effect<R, E, A>.catchAllCause(f: (Cause<E>) -> Effect<R, E, A>): Effect<R, E, A> = Effect { env ->
-    when (val exit = runToExit(env)) {
-        is Exit.Success -> exit.value
-        is Exit.Failure -> f(exit.cause).unsafeRun(env)
-    }
-}
+fun <R, E, A> Effect<R, E, A>.catchAllCause(f: (Cause<E>) -> Effect<R, E, A>): Effect<R, E, A> =
+    foldCause(f) { Effect.succeed(it) }
 
 fun <R, E, E2, A> Effect<R, E, A>.orElse(that: Effect<R, E2, A>): Effect<R, E2, A> = catchAll { that }
 
 fun <R, E, A> Effect<R, E, A>.orElseSucceed(value: A): Effect<R, Nothing, A> = catchAll { Effect.succeed(value) }
 
 /** Turn typed errors into defects: "this can't happen". */
-fun <R, E, A> Effect<R, E, A>.orDie(): Effect<R, Nothing, A> = Effect { env ->
-    try {
-        unsafeRun(env)
-    } catch (t: TypedFailure) {
-        throw (t.error as? Throwable) ?: RuntimeException("orDie: ${t.error}")
-    }
-}
+fun <R, E, A> Effect<R, E, A>.orDie(): Effect<R, Nothing, A> =
+    catchAll { e -> Effect.die((e as? Throwable) ?: RuntimeException("orDie: $e")) }
 
 /** Move the error into the success channel. */
-fun <R, E, A> Effect<R, E, A>.either(): Effect<R, Nothing, Either<E, A>> = Effect { env ->
-    try {
-        Either.Right(unsafeRun(env))
-    } catch (t: TypedFailure) {
-        @Suppress("UNCHECKED_CAST")
-        Either.Left(t.error as E)
-    }
-}
+fun <R, E, A> Effect<R, E, A>.either(): Effect<R, Nothing, Either<E, A>> =
+    map<R, E, A, Either<E, A>> { Either.Right(it) }.catchAll { Effect.succeed(Either.Left(it)) }
 
 /** Capture the full outcome (success, failure, defect) as a value. Interruption still propagates. */
 fun <R, E, A> Effect<R, E, A>.exit(): Effect<R, Nothing, Exit<E, A>> = Effect { env -> runToExit(env) }
 
-fun <R, E, A> Effect<R, E, A>.tapError(f: (E) -> Effect<R, Nothing, *>): Effect<R, E, A> = Effect { env ->
-    try {
-        unsafeRun(env)
-    } catch (t: TypedFailure) {
-        @Suppress("UNCHECKED_CAST")
-        f(t.error as E).unsafeRun(env)
-        throw t
-    }
-}
+fun <R, E, A> Effect<R, E, A>.tapError(f: (E) -> Effect<R, Nothing, *>): Effect<R, E, A> =
+    foldCause({ cause ->
+        when (val e = cause.failureOrCause()) {
+            is Either.Left -> f(e.value).andThen(Effect.failCause(cause))
+            is Either.Right -> Effect.failCause(cause)
+        }
+    }, { Effect.succeed(it) })
 
 /** Fail with [error] when [predicate] does not hold. */
 fun <R, E, A> Effect<R, E, A>.filterOrFail(predicate: (A) -> Boolean, error: (A) -> E): Effect<R, E, A> =
-    Effect { env -> unsafeRun(env).also { if (!predicate(it)) throw TypedFailure(error(it)) } }
+    flatMap { if (predicate(it)) Effect.succeed(it) else Effect.fail(error(it)) }
 
 // ---- Finalization ------------------------------------------------------------
 
@@ -178,7 +152,7 @@ fun <R, E, A> Effect<R, E, A>.timeout(duration: Duration): Effect<R, E, A?> = Ef
 /** `Effect.timeoutFail` */
 fun <R, E, A> Effect<R, E, A>.timeoutFail(duration: Duration, onTimeout: () -> E): Effect<R, E, A> = Effect { env ->
     val box = withTimeoutOrNull(duration) { Box(unsafeRun(env)) }
-    box?.value ?: throw TypedFailure(onTimeout())
+    box?.value ?: raise(Cause.Fail(onTimeout()))
 }
 
 /** Measure how long the effect takes. */

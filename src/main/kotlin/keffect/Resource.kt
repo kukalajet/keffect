@@ -59,20 +59,14 @@ private suspend fun currentScope(): Scope =
 /** Run [block] in a fresh scope and close it with the outcome. */
 internal suspend fun <T> withScope(block: suspend () -> T): T {
     val scope = Scope()
-    val result = try {
-        withContext(ScopeElement(scope)) { block() }
+    val exit = try {
+        withContext(ScopeElement(scope)) { exitOf<Any?, T>(block) }
     } catch (c: CancellationException) {
         scope.close(Exit.Failure(Cause.Interrupt))
         throw c
-    } catch (t: TypedFailure) {
-        scope.close(Exit.Failure(Cause.Fail(t.error)))
-        throw t
-    } catch (t: Throwable) {
-        scope.close(Exit.Failure(Cause.Die(t)))
-        throw t
     }
-    scope.close(Exit.Success(result))
-    return result
+    scope.close(exit)
+    return exit.getOrRaise()
 }
 
 /**

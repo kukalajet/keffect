@@ -19,7 +19,7 @@ class EffectScope<R, E> @PublishedApi internal constructor(
     suspend fun <A> Layer<R, E, A>.bind(): A = build().unsafeRun(env)
 
     /** `yield* Effect.fail(error)` */
-    fun fail(error: E): Nothing = throw TypedFailure(error)
+    fun fail(error: E): Nothing = raise(Cause.Fail(error))
 
     /** Fail with [error] unless [condition] holds. */
     inline fun ensure(condition: Boolean, error: () -> E) {
