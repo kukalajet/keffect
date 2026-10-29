@@ -96,3 +96,12 @@ fun <RIn, E, R, A> Effect<R, E, A>.provide(layer: Layer<RIn, E, R>): Effect<RIn,
         unsafeRun(services)
     }
 }
+
+/**
+ * The same as `provide(layer)` above, for effects that need nothing (`R = Any?`). For those,
+ * `provide(env: R)` accepts a Layer as a plain value too, and without this narrower receiver
+ * the call would be ambiguous.
+ */
+@JvmName("provideToIndependent")
+fun <RIn, E, A> Effect<Any?, E, A>.provide(layer: Layer<RIn, E, Any?>): Effect<RIn, E, A> =
+    provide<RIn, E, Any?, A>(layer) // explicit type arguments select the general overload

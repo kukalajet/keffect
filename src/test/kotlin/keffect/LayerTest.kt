@@ -78,6 +78,14 @@ class LayerTest {
     }
 
     @Test
+    fun `an effect that needs nothing can still be provided a layer`() = runTest {
+        // R = Any? accepts a Layer as a plain environment value too; the layer overload must win.
+        val eff: UIO<Int> = Effect.succeed(1)
+        assertEquals(1, eff.provide(resource("a")).run())
+        assertEquals(listOf("acquire a", "release a ok"), log)
+    }
+
+    @Test
     fun `orElse falls back when the build fails`() = runTest {
         val broken: Layer<Any?, String, String> = Layer.effect(Effect.fail("down"))
         assertEquals("backup", use.provide(broken.orElse(Layer.succeed("backup"))).run())
