@@ -123,7 +123,7 @@ fun <R, E, A> Effect<R, E, A>.onInterrupt(f: Effect<R, Nothing, *>): Effect<R, E
 
 /** Run without being interruptible (e.g. a critical section). */
 fun <R, E, A> Effect<R, E, A>.uninterruptible(): Effect<R, E, A> =
-    Effect { env -> withContext(NonCancellable) { unsafeRun(env) } }
+    Effect { env -> crossing({ withContext(NonCancellable) { it() } }) { unsafeRun(env) } }
 
 // ---- Time --------------------------------------------------------------------
 
@@ -131,12 +131,12 @@ private class Box<A>(val value: A)
 
 /** `Effect.timeout` — `null` if it didn't finish in time (and the work is interrupted). */
 fun <R, E, A> Effect<R, E, A>.timeout(duration: Duration): Effect<R, E, A?> = Effect { env ->
-    withTimeoutOrNull(duration) { Box(unsafeRun(env)) }?.value
+    crossing({ withTimeoutOrNull(duration) { Box(it()) } }) { unsafeRun(env) }?.value
 }
 
 /** `Effect.timeoutFail` */
 fun <R, E, A> Effect<R, E, A>.timeoutFail(duration: Duration, onTimeout: () -> E): Effect<R, E, A> = Effect { env ->
-    val box = withTimeoutOrNull(duration) { Box(unsafeRun(env)) }
+    val box = crossing({ withTimeoutOrNull(duration) { Box(it()) } }) { unsafeRun(env) }
     box?.value ?: raise(Cause.Fail(onTimeout()))
 }
 

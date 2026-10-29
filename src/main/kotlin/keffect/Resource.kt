@@ -1,9 +1,7 @@
 package keffect
 
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 
 /**
  * `Scope` — collects finalizers and runs them in reverse order when closed.
@@ -21,7 +19,7 @@ internal class Scope {
         val runNow = lock.withLock {
             if (closed) true else { finalizers.addFirst(finalizer); false }
         }
-        if (runNow) withContext(NonCancellable) { finalizer(Exit.Failure(Cause.Interrupt)) }
+        if (runNow) finalizerFailure { finalizer(Exit.Failure(Cause.Interrupt)) }?.let { raise(it) }
     }
 
     /** Run every finalizer (last acquired, first released), then raise their failures, in that order. */
@@ -45,10 +43,7 @@ private suspend fun currentScope(): Scope =
 /** Run [block] in a fresh scope, close the scope with the outcome, and return the outcome (see [guarantee]). */
 internal suspend fun <E, T> scopedExit(block: suspend () -> T): Exit<E, T> {
     val scope = Scope()
-    // Capture the outcome inside the scope's context: a defect rethrown across `withContext` may be copied.
-    return guarantee({ scopes.with(scope) { exitOf<E, T>(block) }.getOrRaise() }) { exit: Exit<E, T> ->
-        scope.close(exit)
-    }
+    return guarantee({ scopes.with(scope, block) }) { exit: Exit<E, T> -> scope.close(exit) }
 }
 
 /** [scopedExit], re-raising the failure inside the running effect. */
@@ -61,14 +56,12 @@ internal suspend fun <T> withScope(block: suspend () -> T): T = scopedExit<Any?,
 fun <R, E, A> Effect.Companion.acquireReleaseExit(
     acquire: Effect<R, E, A>,
     release: (A, Exit<*, *>) -> Effect<R, Nothing, *>,
-): Effect<R, E, A> = Effect { env ->
+): Effect<R, E, A> = Effect<R, E, A> { env ->
     val scope = currentScope()
-    withContext(NonCancellable) {
-        val resource = acquire.unsafeRun(env)
-        scope.addFinalizer { exit -> release(resource, exit).unsafeRun(env) }
-        resource
-    }
-}
+    val resource = acquire.unsafeRun(env)
+    scope.addFinalizer { exit -> release(resource, exit).unsafeRun(env) }
+    resource
+}.uninterruptible()
 
 /** `Effect.acquireRelease` when the release doesn't care how the scope ended. */
 fun <R, E, A> Effect.Companion.acquireRelease(
@@ -94,7 +87,7 @@ fun <R, E, A, B> Effect.Companion.acquireUseRelease(
     use: (A) -> Effect<R, E, B>,
     release: (A, Exit<E, B>) -> Effect<R, Nothing, *>,
 ): Effect<R, E, B> = Effect { env ->
-    val resource = withContext(NonCancellable) { acquire.unsafeRun(env) }
+    val resource = acquire.uninterruptible().unsafeRun(env)
     guarantee({ use(resource).unsafeRun(env) }) { exit: Exit<E, B> -> release(resource, exit).unsafeRun(env) }.getOrRaise()
 }
 

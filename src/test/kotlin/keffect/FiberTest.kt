@@ -4,6 +4,7 @@ import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 class FiberTest {
     private val boom = IllegalStateException("boom")
@@ -47,6 +48,32 @@ class FiberTest {
         val exit = Effect.fail("x").delay(10.milliseconds).zipPar(hanging("sibling")).runExit()
         assertEquals(Exit.Failure(Cause.Fail("x")), exit)
         assertEquals(listOf("sibling interrupted"), log)
+    }
+
+    @Test
+    fun `zipPar keeps what the interrupted sibling reports`() = runTest {
+        val exit = Effect.fail("x").delay(10.milliseconds).zipPar(Effect.never.ensuring(Effect.die(boom))).runExit()
+        assertEquals(Exit.Failure(Cause.Both(Cause.Fail("x"), Cause.Then(Cause.Interrupt, Cause.Die(boom)))), exit)
+    }
+
+    @Test
+    fun `concurrent forEach keeps every failure in the order they happened`() = runTest {
+        for (concurrency in listOf(Concurrency.Unbounded, Concurrency(2))) {
+            val exit = Effect.forEach(1..3, concurrency) { i ->
+                when (i) {
+                    1 -> Effect.never.ensuring(Effect.die(boom))
+                    2 -> Effect.fail("x").delay(10.milliseconds)
+                    else -> Effect.succeed(i)
+                }
+            }.runExit()
+            val expected = Exit.Failure(Cause.Both(Cause.Fail("x"), Cause.Then(Cause.Interrupt, Cause.Die(boom))))
+            assertEquals(expected, exit, "$concurrency")
+        }
+    }
+
+    @Test
+    fun `a sibling that interrupts itself interrupts zipPar`() = runTest {
+        assertEquals(Exit.Failure(Cause.Interrupt), Effect.never.zipPar(Effect.interrupt).timeout(1.seconds).runExit())
     }
 
     @Test
@@ -94,9 +121,7 @@ class FiberTest {
     @Test
     fun `a failing root finalizer becomes a defect`() = runTest {
         val exit = Effect.addFinalizer<Any?> { Effect.die(boom) }.andThen(Effect.succeed(1)).runExit()
-        // Compare by type and message: coroutines' stack-trace recovery may hand back a copy of the defect.
-        val defect = ((exit as Exit.Failure).cause as Cause.Die).defect
-        assertEquals(boom::class to boom.message, defect::class to defect.message)
+        assertEquals(Exit.Failure(Cause.Die(boom)), exit)
     }
 
     @Test

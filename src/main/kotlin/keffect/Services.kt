@@ -20,7 +20,7 @@ internal class ContextSlot<T : Any> {
     suspend fun current(): T? = currentCoroutineContext()[key]?.value
 
     /** Run [block] with [value] installed. */
-    suspend fun <R> with(value: T, block: suspend () -> R): R = withContext(Element(value, key)) { block() }
+    suspend fun <R> with(value: T, block: suspend () -> R): R = crossing({ withContext(Element(value, key)) { it() } }, block)
 }
 
 // Default services: the clock and the logger every effect can use without declaring

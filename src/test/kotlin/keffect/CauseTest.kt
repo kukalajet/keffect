@@ -4,6 +4,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertSame
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.TimeSource
 
 class CauseTest {
     private val boom = IllegalStateException("boom")
@@ -43,6 +45,21 @@ class CauseTest {
     fun `catchAll lets defects through unchanged`() {
         val exit = Effect.die(boom).catchAll { _: Nothing -> Effect.succeed(0) }.runBlockingExit()
         assertSame(boom, ((exit as Exit.Failure).cause as Cause.Die).defect)
+    }
+
+    @Test
+    fun `a defect comes out as the object that was thrown, whatever it passed through`() {
+        val die: UIO<Nothing> = Effect.die(boom)
+        mapOf(
+            "withLogger" to die.withLogger { _, _, _ -> },
+            "withClock" to die.withClock(TimeSource.Monotonic),
+            "uninterruptible" to die.uninterruptible(),
+            "timeout" to die.timeout(1.seconds),
+            "provide" to die.provide(Layer.succeed(Unit)),
+            "scoped" to Effect.scoped(die),
+            "acquireRelease" to Effect.acquireRelease(die) { Effect.unit },
+            "zipPar" to die.zipPar(Effect.never),
+        ).forEach { (through, eff) -> assertEquals(Exit.Failure(Cause.Die(boom)), eff.runBlockingExit(), through) }
     }
 
     @Test

@@ -36,7 +36,7 @@ class Effect<in R, out E, out A> @PublishedApi internal constructor(
         fun <E> fail(error: E): Effect<Any?, E, Nothing> = Effect { raise(Cause.Fail(error)) }
 
         /** `Effect.die` — an unexpected defect. */
-        fun die(defect: Throwable): Effect<Any?, Nothing, Nothing> = Effect { throw defect }
+        fun die(defect: Throwable): Effect<Any?, Nothing, Nothing> = failCause(Cause.Die(defect))
 
         fun dieMessage(message: String): Effect<Any?, Nothing, Nothing> = die(RuntimeException(message))
 
@@ -78,7 +78,7 @@ class Effect<in R, out E, out A> @PublishedApi internal constructor(
         val never: Effect<Any?, Nothing, Nothing> = Effect { kotlinx.coroutines.awaitCancellation() }
 
         /** `Effect.interrupt` — interrupt the current fiber. */
-        val interrupt: Effect<Any?, Nothing, Nothing> = Effect { throw CancellationException("Interrupted") }
+        val interrupt: Effect<Any?, Nothing, Nothing> = failCause(Cause.Interrupt)
 
         /** Access the whole environment. The analogue of yielding a service Tag. */
         fun <R> environment(): Effect<R, Nothing, R> = Effect { it }
@@ -113,7 +113,7 @@ sealed interface Cause<out E> {
     /** The fiber was interrupted. */
     data object Interrupt : Cause<Nothing>
 
-    /** Both sides failed (e.g. in `race`). */
+    /** Both failed, concurrently (e.g. in `race`, `zipPar`, `forEach`). */
     data class Both<out E>(val left: Cause<E>, val right: Cause<E>) : Cause<E>
 
     /** [first] happened, then [second] (e.g. a finalizer failed after the effect did). */
@@ -155,8 +155,10 @@ class FiberFailure(val effectCause: Cause<*>) : RuntimeException(
 //
 // A running effect reports failure by throwing. This section is the only code that
 // knows how: [raise] turns a Cause into a throw, [exitOf] turns a throw back into
-// a Cause, and the round trip is lossless. [guarantee] is the one place that runs
-// finalizers and decides how their failures combine. Everything else speaks Cause/Exit.
+// a Cause, and the round trip is lossless, through `withContext` and the like too
+// (see [crossing]). [guarantee] is the one place that runs finalizers and decides how
+// their failures combine; `forkAll` does the same for concurrent children.
+// Everything else speaks Cause/Exit.
 //  - Fail, Both and Then travel inside a [CauseFailure],
 //  - Die is the defect itself, so it keeps its stack trace and type,
 //  - Interrupt is a CancellationException, because that is how coroutines cancel.
@@ -192,6 +194,30 @@ internal fun raise(cause: Cause<*>): Nothing = when (cause) {
     Cause.Interrupt -> throw CancellationException("Interrupted")
     is Cause.Fail, is Cause.Both, is Cause.Then -> throw CauseFailure(cause)
 }
+
+/**
+ * Run [block] through [call] (a `withContext`, a `withTimeoutOrNull`) so that a defect comes out as
+ * the object that was thrown. Coroutines' stack-trace recovery copies an exception that crosses such
+ * a call, but not the stackless [CauseFailure], so a defect crosses wrapped in one. It still crosses
+ * as an exception: a cancelled call discards a value, and a failure must never be discarded.
+ */
+internal suspend fun <T, R> crossing(call: suspend (suspend () -> T) -> R, block: suspend () -> T): R =
+    try {
+        call {
+            try {
+                block()
+            } catch (c: CancellationException) {
+                throw c
+            } catch (f: CauseFailure) {
+                throw f
+            } catch (t: Throwable) {
+                throw CauseFailure(Cause.Die(t))
+            }
+        }
+    } catch (f: CauseFailure) {
+        val cause = f.failure
+        throw if (cause is Cause.Die) cause.defect else f
+    }
 
 /**
  * Run [block], then [finalizer] with its outcome, uninterruptibly, whatever happened.

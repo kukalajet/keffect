@@ -7,8 +7,8 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
@@ -17,6 +17,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
 
 // ---------------------------------------------------------------------------
@@ -125,6 +126,51 @@ fun <R, E, A> Effect<R, E, A>.forkDaemon(): Effect<R, Nothing, Fiber<E, A>> =
 // interrupts the siblings, and nothing leaks past the call.
 // ---------------------------------------------------------------------------
 
+/**
+ * Run [tasks] as child fibers, at most [permits] at a time, and wait for all of them.
+ *
+ * The first failure interrupts the rest. Every failure a child reports is kept, in the order they
+ * happened, combined with [Cause.Both]: a finalizer that failed while its fiber was being interrupted
+ * counts, a child that was only interrupted adds nothing. Each outcome is recorded inside its fiber,
+ * because a cancelled coroutine discards its result (see [Fiber]).
+ */
+private suspend fun <A> forkAll(tasks: List<suspend () -> A>, permits: Int = Int.MAX_VALUE): List<A> {
+    val values = arrayOfNulls<Any?>(tasks.size)
+    val failures = ConcurrentLinkedQueue<Cause<*>>()
+    val gate = if (permits < tasks.size) Semaphore(permits) else null
+    val cancelled = try {
+        coroutineScope {
+            tasks.forEachIndexed { i, task ->
+                launch {
+                    asFiber {
+                        val exit = try {
+                            exitOf<Any?, A> { if (gate == null) task() else gate.withPermit { task() } }
+                        } catch (c: CancellationException) {
+                            Exit.Failure(Cause.Interrupt)
+                        }
+                        when (exit) {
+                            is Exit.Success -> values[i] = exit.value
+                            is Exit.Failure -> {
+                                failures += exit.cause
+                                this@coroutineScope.coroutineContext.cancelChildren()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        null
+    } catch (c: CancellationException) {
+        c
+    }
+    // A failure is never hidden by interruption, the siblings' or the caller's.
+    failures.filter { it != Cause.Interrupt }.reduceOrNull<Cause<*>, Cause<*>> { a, b -> Cause.Both(a, b) }?.let { raise(it) }
+    if (cancelled != null) throw cancelled
+    if (failures.isNotEmpty()) raise(Cause.Interrupt) // a child interrupted itself
+    @Suppress("UNCHECKED_CAST")
+    return values.asList() as List<A>
+}
+
 /** Concurrency option, like `{ concurrency: n | "unbounded" }`. */
 sealed interface Concurrency {
     data object Sequential : Concurrency
@@ -142,17 +188,12 @@ fun <R, E, T, A> Effect.Companion.forEach(
     concurrency: Concurrency = Concurrency.Sequential,
     f: (T) -> Effect<R, E, A>,
 ): Effect<R, E, List<A>> = Effect { env ->
-    when (concurrency) {
-        Concurrency.Sequential -> items.map { f(it).unsafeRun(env) }
-        Concurrency.Unbounded -> coroutineScope {
-            items.map { item -> asyncFiber { f(item).unsafeRun(env) } }.awaitAll()
-        }
-
-        is Concurrency.Bounded -> coroutineScope {
-            val permits = Semaphore(concurrency.n)
-            items.map { item -> asyncFiber { permits.withPermit { f(item).unsafeRun(env) } } }.awaitAll()
-        }
+    val permits = when (concurrency) {
+        Concurrency.Sequential -> return@Effect items.map { f(it).unsafeRun(env) }
+        Concurrency.Unbounded -> Int.MAX_VALUE
+        is Concurrency.Bounded -> concurrency.n
     }
+    forkAll(items.map { item -> suspend { f(item).unsafeRun(env) } }, permits)
 }
 
 /** `Effect.all([...], { concurrency })` */
@@ -168,11 +209,9 @@ fun <R, E, A> Effect.Companion.all(
 
 /** Run both concurrently; fail fast if either fails. */
 fun <R, E, A, B> Effect<R, E, A>.zipPar(that: Effect<R, E, B>): Effect<R, E, Pair<A, B>> = Effect { env ->
-    coroutineScope {
-        val a = asyncFiber { unsafeRun(env) }
-        val b = asyncFiber { that.unsafeRun(env) }
-        a.await() to b.await()
-    }
+    val (a, b) = forkAll(listOf<suspend () -> Any?>({ unsafeRun(env) }, { that.unsafeRun(env) }))
+    @Suppress("UNCHECKED_CAST")
+    Pair(a as A, b as B)
 }
 
 fun <R, E, A, B, C> Effect<R, E, A>.zipWithPar(that: Effect<R, E, B>, f: (A, B) -> C): Effect<R, E, C> =
