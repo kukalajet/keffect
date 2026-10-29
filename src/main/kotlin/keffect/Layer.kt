@@ -1,11 +1,7 @@
 package keffect
 
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
-import kotlin.coroutines.AbstractCoroutineContextElement
-import kotlin.coroutines.CoroutineContext
 
 /**
  * `Layer<ROut, E, RIn>` — a recipe for building services of type [ROut] from [RIn],
@@ -24,7 +20,7 @@ class Layer<in RIn, out E, out ROut> @PublishedApi internal constructor(
      * so a layer referenced several times in one graph is built once.
      */
     internal fun build(): Effect<RIn, E, ROut> = Effect { env ->
-        val memo = currentCoroutineContext()[MemoMap] ?: return@Effect builder.unsafeRun(env)
+        val memo = memoMaps.current() ?: return@Effect builder.unsafeRun(env)
         val fresh = CompletableDeferred<Any?>()
         val existing = memo.builds.putIfAbsent(this, fresh)
         if (existing != null) {
@@ -55,9 +51,9 @@ class Layer<in RIn, out E, out ROut> @PublishedApi internal constructor(
     }
 }
 
-internal class MemoMap : AbstractCoroutineContextElement(Key) {
-    companion object Key : CoroutineContext.Key<MemoMap>
+private val memoMaps = ContextSlot<MemoMap>()
 
+private class MemoMap {
     val builds = ConcurrentHashMap<Layer<*, *, *>, CompletableDeferred<Any?>>()
 }
 
@@ -92,7 +88,7 @@ fun <RIn, E, R, A> Effect<R, E, A>.provide(layer: Layer<RIn, E, R>): Effect<RIn,
     // A fresh memo map per provide: builds are shared within this layer graph,
     // and never outlive the scope that owns their resources.
     withScope {
-        val services = withContext(MemoMap()) { layer.build().unsafeRun(env) }
+        val services = memoMaps.with(MemoMap()) { layer.build().unsafeRun(env) }
         unsafeRun(services)
     }
 }
