@@ -6,6 +6,23 @@ import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 import kotlin.time.TimeSource
 
+/**
+ * A value carried by the running coroutine context and inherited by forked fibers: how the
+ * library threads the clock, the logger, the current scope, the layer memo map and the
+ * current fiber through a run without putting them in R.
+ */
+internal class ContextSlot<T : Any> {
+    private class Element<T>(val value: T, key: CoroutineContext.Key<*>) : AbstractCoroutineContextElement(key)
+
+    private val key = object : CoroutineContext.Key<Element<T>> {}
+
+    /** The value installed by the nearest enclosing [with], if any. */
+    suspend fun current(): T? = currentCoroutineContext()[key]?.value
+
+    /** Run [block] with [value] installed. */
+    suspend fun <R> with(value: T, block: suspend () -> R): R = withContext(Element(value, key)) { block() }
+}
+
 // Default services: the clock and the logger every effect can use without declaring
 // them in R. Like Effect-TS's `Effect.withClock` / `Logger.replace`, they live in the
 // running context (here the coroutine context) and are inherited by forked fibers.
@@ -23,17 +40,12 @@ fun interface Logger {
     }
 }
 
-private class ClockElement(val timeSource: TimeSource) : AbstractCoroutineContextElement(Key) {
-    companion object Key : CoroutineContext.Key<ClockElement>
-}
-
-private class LoggerElement(val logger: Logger) : AbstractCoroutineContextElement(Key) {
-    companion object Key : CoroutineContext.Key<LoggerElement>
-}
+private val clocks = ContextSlot<TimeSource>()
+private val loggers = ContextSlot<Logger>()
 
 /** The clock that measures elapsed time (`timed`, `Schedule.upTo`). */
 internal suspend fun currentTimeSource(): TimeSource =
-    currentCoroutineContext()[ClockElement]?.timeSource ?: TimeSource.Monotonic
+    clocks.current() ?: TimeSource.Monotonic
 
 /**
  * `Effect.withClock` — measure elapsed time with [timeSource] while this effect runs.
@@ -42,15 +54,14 @@ internal suspend fun currentTimeSource(): TimeSource =
  * under `runTest` and pass its `testTimeSource`, and both are virtual.
  */
 fun <R, E, A> Effect<R, E, A>.withClock(timeSource: TimeSource): Effect<R, E, A> =
-    Effect { env -> withContext(ClockElement(timeSource)) { unsafeRun(env) } }
+    Effect { env -> clocks.with(timeSource) { unsafeRun(env) } }
 
 /** `Logger.replace` — send this effect's logs (and its fibers' logs) to [logger]. */
 fun <R, E, A> Effect<R, E, A>.withLogger(logger: Logger): Effect<R, E, A> =
-    Effect { env -> withContext(LoggerElement(logger)) { unsafeRun(env) } }
+    Effect { env -> loggers.with(logger) { unsafeRun(env) } }
 
 fun Effect.Companion.log(message: String, level: String = "INFO"): Effect<Any?, Nothing, Unit> = Effect {
-    val logger = currentCoroutineContext()[LoggerElement]?.logger ?: Logger.console
-    logger.log(level, message, currentFiberId())
+    (loggers.current() ?: Logger.console).log(level, message, currentFiberId())
 }
 
 fun Effect.Companion.logError(message: String) = log(message, "ERROR")

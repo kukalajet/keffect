@@ -18,8 +18,6 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
-import kotlin.coroutines.AbstractCoroutineContextElement
-import kotlin.coroutines.CoroutineContext
 
 // ---------------------------------------------------------------------------
 // Fibers
@@ -32,9 +30,9 @@ import kotlin.coroutines.CoroutineContext
 
 private val fiberIds = AtomicInteger(0)
 
-internal class FiberContext(val id: Int) : AbstractCoroutineContextElement(Key) {
-    companion object Key : CoroutineContext.Key<FiberContext>
+private val fibers = ContextSlot<FiberContext>()
 
+internal class FiberContext(val id: Int) {
     private val children: MutableSet<Job> = ConcurrentHashMap.newKeySet()
 
     /** Interrupt [child] when this fiber ends (unless it has finished by then). */
@@ -46,12 +44,12 @@ internal class FiberContext(val id: Int) : AbstractCoroutineContextElement(Key) 
     suspend fun interruptChildren() = children.forEach { it.cancelAndJoin() }
 }
 
-internal suspend fun currentFiberId(): Int = currentCoroutineContext()[FiberContext]?.id ?: 0
+internal suspend fun currentFiberId(): Int = fibers.current()?.id ?: 0
 
 /** Run [block] as a fiber: it gets its own id, and children it forks are interrupted when it ends. */
 internal suspend fun <T> asFiber(id: Int = fiberIds.incrementAndGet(), block: suspend () -> T): T {
     val fiber = FiberContext(id)
-    return withContext(fiber) {
+    return fibers.with(fiber) {
         try {
             block()
         } finally {
@@ -88,9 +86,10 @@ class Fiber<out E, out A> internal constructor(
 
 private suspend fun <R, E, A> startFiber(effect: Effect<R, E, A>, env: R, daemon: Boolean): Fiber<E, A> {
     val ctx = currentCoroutineContext()
+    val parent = fibers.current()
     // A fresh Job: the parent coroutine does not wait for it (fibers are not structured like `launch`),
     // but we register it with the parent fiber so it is interrupted when the parent ends.
-    val scope = CoroutineScope(ctx.minusKey(Job).minusKey(FiberContext) + Job())
+    val scope = CoroutineScope(ctx.minusKey(Job) + Job())
     val id = fiberIds.incrementAndGet()
     val exit = CompletableDeferred<Exit<E, A>>()
     val job = scope.launch {
@@ -106,7 +105,7 @@ private suspend fun <R, E, A> startFiber(effect: Effect<R, E, A>, env: R, daemon
     }
     // Interrupted before it started: there is no other outcome.
     job.invokeOnCompletion { exit.complete(Exit.Failure(Cause.Interrupt)) }
-    if (!daemon) ctx[FiberContext]?.supervise(job)
+    if (!daemon) parent?.supervise(job)
     return Fiber(id, job, exit)
 }
 

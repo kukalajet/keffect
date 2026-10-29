@@ -1,12 +1,9 @@
 package keffect
 
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlin.coroutines.AbstractCoroutineContextElement
-import kotlin.coroutines.CoroutineContext
 
 /**
  * `Scope` — collects finalizers and runs them in reverse order when closed.
@@ -39,19 +36,17 @@ internal class Scope {
     }
 }
 
-internal class ScopeElement(val scope: Scope) : AbstractCoroutineContextElement(Key) {
-    companion object Key : CoroutineContext.Key<ScopeElement>
-}
+private val scopes = ContextSlot<Scope>()
 
 private suspend fun currentScope(): Scope =
-    currentCoroutineContext()[ScopeElement]?.scope
+    scopes.current()
         ?: error("No Scope in context. Run the effect with run*/runBlocking, or wrap it in Effect.scoped { }.")
 
 /** Run [block] in a fresh scope, close the scope with the outcome, and return the outcome (see [guarantee]). */
 internal suspend fun <E, T> scopedExit(block: suspend () -> T): Exit<E, T> {
     val scope = Scope()
     // Capture the outcome inside the scope's context: a defect rethrown across `withContext` may be copied.
-    return guarantee({ withContext(ScopeElement(scope)) { exitOf<E, T>(block) }.getOrRaise() }) { exit: Exit<E, T> ->
+    return guarantee({ scopes.with(scope) { exitOf<E, T>(block) }.getOrRaise() }) { exit: Exit<E, T> ->
         scope.close(exit)
     }
 }
