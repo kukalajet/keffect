@@ -6,36 +6,30 @@ import kotlin.test.assertEquals
 
 // Finalizers run whatever happens, and a failing finalizer never hides the original outcome:
 // it is appended to it as `Cause.Then(original, finalizerFailure)`.
-// Causes are compared via `pretty()`: coroutines' stack-trace recovery may hand back a copy of a defect.
 class FinalizerTest {
     private val boom = IllegalStateException("boom")
     private val bang = IllegalStateException("bang")
     private val log = mutableListOf<String>()
     private fun record(line: String) = Effect.sync { log += line }
 
-    private fun Exit<*, *>.pretty(): String = when (this) {
-        is Exit.Success -> "Success($value)"
-        is Exit.Failure -> cause.pretty()
-    }
-
     @Test
     fun `a failing finalizer after success is the failure`() {
-        assertEquals("Die(IllegalStateException: boom)", Effect.succeed(1).ensuring(Effect.die(boom)).runBlockingExit().pretty())
+        assertEquals(Exit.Failure(Cause.Die(boom)), Effect.succeed(1).ensuring(Effect.die(boom)).runBlockingExit())
     }
 
     @Test
     fun `a failing finalizer after a failure keeps both causes`() {
         assertEquals(
-            "Then(Fail(e), Die(IllegalStateException: boom))",
-            Effect.fail("e").ensuring(Effect.die(boom)).runBlockingExit().pretty(),
+            Exit.Failure(Cause.Then(Cause.Fail("e"), Cause.Die(boom))),
+            Effect.fail("e").ensuring(Effect.die(boom)).runBlockingExit(),
         )
     }
 
     @Test
     fun `a failing finalizer after interruption keeps the interruption`() {
         assertEquals(
-            "Then(Interrupt, Die(IllegalStateException: boom))",
-            Effect.interrupt.onExit { Effect.die(boom) }.runBlockingExit().pretty(),
+            Exit.Failure(Cause.Then(Cause.Interrupt, Cause.Die(boom))),
+            Effect.interrupt.onExit { Effect.die(boom) }.runBlockingExit(),
         )
     }
 
@@ -46,7 +40,7 @@ class FinalizerTest {
             use = { Effect.fail("e") },
             release = { _, _ -> Effect.die(boom) },
         )
-        assertEquals("Then(Fail(e), Die(IllegalStateException: boom))", eff.runBlockingExit().pretty())
+        assertEquals(Exit.Failure(Cause.Then(Cause.Fail("e"), Cause.Die(boom))), eff.runBlockingExit())
     }
 
     @Test
@@ -56,7 +50,7 @@ class FinalizerTest {
             use = { throw boom },
             release = { _, _ -> record("released") },
         )
-        assertEquals("Die(IllegalStateException: boom)", eff.runBlockingExit().pretty())
+        assertEquals(Exit.Failure(Cause.Die(boom)), eff.runBlockingExit())
         assertEquals(listOf("released"), log)
     }
 
@@ -69,8 +63,8 @@ class FinalizerTest {
             fail("e")
         }
         assertEquals(
-            "Then(Fail(e), Then(Die(IllegalStateException: bang), Die(IllegalStateException: boom)))",
-            eff.runBlockingExit().pretty(),
+            Exit.Failure(Cause.Then(Cause.Fail("e"), Cause.Then(Cause.Die(bang), Cause.Die(boom)))),
+            eff.runBlockingExit(),
         )
         assertEquals(listOf("first acquired"), log)
     }
@@ -78,7 +72,7 @@ class FinalizerTest {
     @Test
     fun `a failing root finalizer is appended to the run's failure`() = runTest {
         val exit = Effect.addFinalizer<Any?> { Effect.die(boom) }.andThen(Effect.fail("e")).runExit()
-        assertEquals("Then(Fail(e), Die(IllegalStateException: boom))", exit.pretty())
+        assertEquals(Exit.Failure(Cause.Then(Cause.Fail("e"), Cause.Die(boom))), exit)
     }
 
     @Test
@@ -89,11 +83,15 @@ class FinalizerTest {
 
     @Test
     fun `an interrupted fiber reports a finalizer that failed during interruption`() = runTest {
-        val exit = effect<Any?, Nothing, Exit<Nothing, Nothing>> {
-            val fiber = Effect.never.ensuring(Effect.die(boom)).forkDaemon().bind()
-            Effect.yieldNow.bind()
-            fiber.interrupt.bind()
-        }.run()
-        assertEquals("Then(Interrupt, Die(IllegalStateException: boom))", exit.pretty())
+        val dying: UIO<Nothing> = Effect.never.ensuring(Effect.die(boom))
+        // Also when the effect runs in a scope of its own.
+        for (eff in listOf(dying, Effect.scoped(dying), dying.provide(Layer.succeed(Unit)))) {
+            val exit = effect<Any?, Nothing, Exit<Nothing, Nothing>> {
+                val fiber = eff.forkDaemon().bind()
+                Effect.yieldNow.bind()
+                fiber.interrupt.bind()
+            }.run()
+            assertEquals(Exit.Failure(Cause.Then(Cause.Interrupt, Cause.Die(boom))), exit)
+        }
     }
 }

@@ -76,6 +76,9 @@ Typealiases: `IO<E, A>` (no requirements), `UIO<A>` (no requirements, can't fail
   Other exceptions are defects (`Cause.Die`); `CancellationException` is interruption.
 * Finalizers (`ensuring`, `onExit`, releases, scope close) run uninterruptibly, whatever happened.
   A failing finalizer never hides the outcome: it becomes `Cause.Then(outcome, finalizerFailure)`.
+* `zipPar`, `forEach` and `all` interrupt the other children on the first failure, and keep every
+  failure the children report, combined as `Cause.Both` (including a finalizer that failed while
+  its child was being interrupted).
 * Fibers are coroutines. Like Effect-TS, `fork` is supervised by the parent *fiber*:
   children are interrupted when the parent finishes. `forkDaemon` outlives it.
 * `Scope` and the layer memo map live in the coroutine context.

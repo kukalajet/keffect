@@ -4,6 +4,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertSame
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.TimeSource
 
 class CauseTest {
     private val boom = IllegalStateException("boom")
@@ -46,6 +48,21 @@ class CauseTest {
     }
 
     @Test
+    fun `a defect comes out as the object that was thrown, whatever it passed through`() {
+        val die: UIO<Nothing> = Effect.die(boom)
+        mapOf(
+            "withLogger" to die.withLogger { _, _, _ -> },
+            "withClock" to die.withClock(TimeSource.Monotonic),
+            "uninterruptible" to die.uninterruptible(),
+            "timeout" to die.timeout(1.seconds),
+            "provide" to die.provide(Layer.succeed(Unit)),
+            "scoped" to Effect.scoped(die),
+            "acquireRelease" to Effect.acquireRelease(die) { Effect.unit },
+            "zipPar" to die.zipPar(Effect.never),
+        ).forEach { (through, eff) -> assertEquals(Exit.Failure(Cause.Die(boom)), eff.runBlockingExit(), through) }
+    }
+
+    @Test
     fun `catchSome re-raises when the handler declines`() {
         val eff: IO<String, Int> = Effect.fail("nope")
         assertEquals(Exit.Failure(Cause.Fail("nope")), eff.catchSome { null }.runBlockingExit())
@@ -85,6 +102,12 @@ class CauseTest {
     fun `filterOrFail and timeoutFail fail with typed errors`() {
         assertEquals(Exit.Failure(Cause.Fail("odd")), Effect.succeed(1).filterOrFail({ it % 2 == 0 }) { "odd" }.runBlockingExit())
         assertEquals(Exit.Failure(Cause.Fail("slow")), Effect.never.timeoutFail(10.milliseconds) { "slow" }.runBlockingExit())
+    }
+
+    @Test
+    fun `timeoutFail keeps a null that arrived in time`() {
+        val eff: IO<String, Int?> = Effect.succeed<Int?>(null).timeoutFail(1.seconds) { "slow" }
+        assertEquals(Exit.Success(null), eff.runBlockingExit())
     }
 
     @Test
