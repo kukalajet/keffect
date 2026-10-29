@@ -3,7 +3,6 @@ package keffect
 import kotlin.random.Random
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.ZERO
-import kotlin.time.TimeSource
 
 /**
  * `Schedule` — decides whether to go again and how long to wait.
@@ -74,9 +73,9 @@ fun <I> Schedule<I>.upTo(max: Duration): Schedule<I> =
 fun <I> Schedule<I>.capDelay(max: Duration): Schedule<I> =
     Schedule { n, i, e -> next(n, i, e)?.let { minOf(it, max) } }
 
-/** Randomize each delay by ±[factor] (default ±20%). */
-fun <I> Schedule<I>.jittered(factor: Double = 0.2): Schedule<I> =
-    Schedule { n, i, e -> next(n, i, e)?.let { it * (1 + Random.nextDouble(-factor, factor)) } }
+/** Randomize each delay by ±[factor] (default ±20%), drawing from [random]. */
+fun <I> Schedule<I>.jittered(factor: Double = 0.2, random: Random = Random): Schedule<I> =
+    Schedule { n, i, e -> next(n, i, e)?.let { it * (1 + random.nextDouble(-factor, factor)) } }
 
 /** Call [f] with each decision, e.g. for logging. */
 fun <I> Schedule<I>.onDecision(f: (attempt: Int, input: I, delay: Duration?) -> Unit): Schedule<I> =
@@ -92,7 +91,7 @@ private suspend fun pause(wait: Duration) {
 
 /** `Effect.retry(schedule)` — retry on *typed* failures. Defects and interruption are not retried. */
 fun <R, E, A> Effect<R, E, A>.retry(schedule: Schedule<E>): Effect<R, E, A> = Effect { env ->
-    val start = TimeSource.Monotonic.markNow()
+    val start = currentTimeSource().markNow()
     var attempt = 1
     while (true) {
         val cause = when (val exit = runToExit(env)) {
@@ -113,7 +112,7 @@ fun <R, E, A> Effect<R, E, A>.retry(times: Int): Effect<R, E, A> = retry(Schedul
 
 /** `Effect.repeat(schedule)` — run once, then again while the schedule continues. Returns the last value. */
 fun <R, E, A> Effect<R, E, A>.repeat(schedule: Schedule<A>): Effect<R, E, A> = Effect { env ->
-    val start = TimeSource.Monotonic.markNow()
+    val start = currentTimeSource().markNow()
     var attempt = 1
     var last = unsafeRun(env)
     while (true) {
@@ -128,7 +127,7 @@ fun <R, E, A> Effect<R, E, A>.repeat(schedule: Schedule<A>): Effect<R, E, A> = E
 
 /** `Effect.schedule` — run repeatedly in the background-friendly form: first run *after* the first delay. */
 fun <R, E, A> Effect<R, E, A>.schedule(schedule: Schedule<Any?>): Effect<R, E, Unit> = Effect { env ->
-    val start = TimeSource.Monotonic.markNow()
+    val start = currentTimeSource().markNow()
     var attempt = 1
     while (true) {
         val wait = schedule.next(attempt, Unit, start.elapsedNow()) ?: return@Effect

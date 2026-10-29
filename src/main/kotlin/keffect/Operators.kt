@@ -157,7 +157,7 @@ fun <R, E, A> Effect<R, E, A>.timeoutFail(duration: Duration, onTimeout: () -> E
 
 /** Measure how long the effect takes. */
 fun <R, E, A> Effect<R, E, A>.timed(): Effect<R, E, Pair<Duration, A>> = Effect { env ->
-    val mark = kotlin.time.TimeSource.Monotonic.markNow()
+    val mark = currentTimeSource().markNow()
     val a = unsafeRun(env)
     mark.elapsedNow() to a
 }
@@ -169,13 +169,3 @@ fun <R, E, A> Effect<R, E, A>.provide(env: R): Effect<Any?, E, A> = Effect { uns
 
 /** Adapt the environment, e.g. to run a sub-program that needs only part of it. */
 fun <R, R2, E, A> Effect<R, E, A>.provideSome(f: (R2) -> R): Effect<R2, E, A> = Effect { env -> unsafeRun(f(env)) }
-
-// ---- Logging (a tiny stand-in for Effect.log) -----------------------------------
-
-fun Effect.Companion.log(message: String, level: String = "INFO"): Effect<Any?, Nothing, Unit> = Effect {
-    val fiber = currentFiberId()
-    val time = java.time.LocalTime.now().withNano(0)
-    println("$time level=$level fiber=#$fiber message=\"$message\"")
-}
-
-fun Effect.Companion.logError(message: String) = log(message, "ERROR")

@@ -60,12 +60,14 @@ Typealiases: `IO<E, A>` (no requirements), `UIO<A>` (no requirements, can't fail
 | `Effect.race / raceAll` | same |
 | `Schedule.recurs / spaced / exponential / fibonacci` | same |
 | `Schedule.intersect / union` | `a and b`, `a or b` |
-| `Schedule.whileInput / upTo / jittered` | same, plus `capDelay`, `onDecision` |
+| `Schedule.whileInput / upTo / jittered` | same, plus `capDelay`, `onDecision`; `jittered` takes an optional `Random` |
 | `Effect.retry / repeat / schedule` | same; `retry(times = 3)` |
 | `Effect.runPromise / runPromiseExit` | `run() / runExit()` (suspend) |
 | `Effect.runSync` | `runBlocking() / runBlockingExit()` |
 | `Exit`, `Cause.Fail / Die / Interrupt` | same |
-| `Effect.log` | `Effect.log` (println with fiber id) |
+| `Effect.log` | `Effect.log` (println with fiber id by default) |
+| `Logger.replace` | `eff.withLogger { level, message, fiberId -> ... }` |
+| `Effect.withClock` | `eff.withClock(timeSource)` (e.g. `testTimeSource` under `runTest`) |
 
 ## How it works
 
