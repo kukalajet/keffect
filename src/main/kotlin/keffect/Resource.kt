@@ -56,18 +56,24 @@ private suspend fun currentScope(): Scope =
     currentCoroutineContext()[ScopeElement]?.scope
         ?: error("No Scope in context. Run the effect with run*/runBlocking, or wrap it in Effect.scoped { }.")
 
-/** Run [block] in a fresh scope and close it with the outcome. */
-internal suspend fun <T> withScope(block: suspend () -> T): T {
+/**
+ * Run [block] in a fresh scope, close the scope with the outcome, and return that outcome.
+ * A failing finalizer is thrown; interruption closes the scope and keeps propagating.
+ */
+internal suspend fun <E, T> scopedExit(block: suspend () -> T): Exit<E, T> {
     val scope = Scope()
     val exit = try {
-        withContext(ScopeElement(scope)) { exitOf<Any?, T>(block) }
+        withContext(ScopeElement(scope)) { exitOf<E, T>(block) }
     } catch (c: CancellationException) {
         scope.close(Exit.Failure(Cause.Interrupt))
         throw c
     }
     scope.close(exit)
-    return exit.getOrRaise()
+    return exit
 }
+
+/** [scopedExit], re-raising the failure inside the running effect. */
+internal suspend fun <T> withScope(block: suspend () -> T): T = scopedExit<Any?, T>(block).getOrRaise()
 
 /**
  * `Effect.acquireRelease` (exit-aware form) — acquire a resource (uninterruptibly) and register its release
