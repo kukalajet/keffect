@@ -1,7 +1,6 @@
 package keffect
 
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.withContext
 
 // Running effects. Only effects whose requirements are fully satisfied (`R = Any?`)
 // can be run — `provide` them first. The compiler enforces this.
@@ -9,17 +8,7 @@ import kotlinx.coroutines.withContext
 /** `Effect.runPromiseExit` — run as the root fiber and return the outcome. */
 suspend fun <E, A> Effect<Any?, E, A>.runExit(): Exit<E, A> =
     try {
-        asFiber {
-            val root = Scope()
-            val exit: Exit<E, A> = try {
-                withContext(ScopeElement(root)) { runToExit(Unit) }
-            } catch (c: CancellationException) {
-                root.close(Exit.Failure(Cause.Interrupt))
-                throw c
-            }
-            root.close(exit)
-            exit
-        }
+        asFiber { scopedExit { unsafeRun(Unit) } }
     } catch (c: CancellationException) {
         interruptedExit(c)
     } catch (t: Throwable) {

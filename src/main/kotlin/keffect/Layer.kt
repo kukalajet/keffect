@@ -19,8 +19,11 @@ class Layer<in RIn, out E, out ROut> @PublishedApi internal constructor(
     private val builder: Effect<RIn, E, ROut>,
     val name: String? = null,
 ) {
-    /** The memoized build of this layer, as an effect. */
-    fun build(): Effect<RIn, E, ROut> = Effect { env ->
+    /**
+     * The build of this layer, as an effect: memoized within the enclosing `provide(layer)`,
+     * so a layer referenced several times in one graph is built once.
+     */
+    internal fun build(): Effect<RIn, E, ROut> = Effect { env ->
         val memo = currentCoroutineContext()[MemoMap] ?: return@Effect builder.unsafeRun(env)
         val fresh = CompletableDeferred<Any?>()
         val existing = memo.builds.putIfAbsent(this, fresh)

@@ -33,7 +33,15 @@ private val fiberIds = AtomicInteger(0)
 internal class FiberContext(val id: Int) : AbstractCoroutineContextElement(Key) {
     companion object Key : CoroutineContext.Key<FiberContext>
 
-    val children: MutableSet<Job> = ConcurrentHashMap.newKeySet()
+    private val children: MutableSet<Job> = ConcurrentHashMap.newKeySet()
+
+    /** Interrupt [child] when this fiber ends (unless it has finished by then). */
+    fun supervise(child: Job) {
+        children.add(child)
+        child.invokeOnCompletion { children.remove(child) }
+    }
+
+    suspend fun interruptChildren() = children.forEach { it.cancelAndJoin() }
 }
 
 internal suspend fun currentFiberId(): Int = currentCoroutineContext()[FiberContext]?.id ?: 0
@@ -45,9 +53,7 @@ internal suspend fun <T> asFiber(id: Int = fiberIds.incrementAndGet(), block: su
         try {
             block()
         } finally {
-            withContext(NonCancellable) {
-                fiber.children.forEach { it.cancelAndJoin() }
-            }
+            withContext(NonCancellable) { fiber.interruptChildren() }
         }
     }
 }
@@ -93,13 +99,12 @@ private suspend fun <R, E, A> startFiber(effect: Effect<R, E, A>, env: R, daemon
             }
         }
     }
-    if (!daemon) {
-        val parent = ctx[FiberContext]
-        parent?.children?.add(deferred)
-        deferred.invokeOnCompletion { parent?.children?.remove(deferred) }
-    }
+    if (!daemon) ctx[FiberContext]?.supervise(deferred)
     return Fiber(id, deferred)
 }
+
+/** Start [block] as a child fiber of this structured scope: it fails with the scope and is joined by it. */
+private fun <T> CoroutineScope.asyncFiber(block: suspend () -> T): Deferred<T> = async { asFiber(block = block) }
 
 /** `Effect.fork` — start the effect in a new fiber, supervised by the current one. */
 fun <R, E, A> Effect<R, E, A>.fork(): Effect<R, Nothing, Fiber<E, A>> =
@@ -134,12 +139,12 @@ fun <R, E, T, A> Effect.Companion.forEach(
     when (concurrency) {
         Concurrency.Sequential -> items.map { f(it).unsafeRun(env) }
         Concurrency.Unbounded -> coroutineScope {
-            items.map { item -> async { asFiber { f(item).unsafeRun(env) } } }.awaitAll()
+            items.map { item -> asyncFiber { f(item).unsafeRun(env) } }.awaitAll()
         }
 
         is Concurrency.Bounded -> coroutineScope {
             val permits = Semaphore(concurrency.n)
-            items.map { item -> async { permits.withPermit { asFiber { f(item).unsafeRun(env) } } } }.awaitAll()
+            items.map { item -> asyncFiber { permits.withPermit { f(item).unsafeRun(env) } } }.awaitAll()
         }
     }
 }
@@ -158,8 +163,8 @@ fun <R, E, A> Effect.Companion.all(
 /** Run both concurrently; fail fast if either fails. */
 fun <R, E, A, B> Effect<R, E, A>.zipPar(that: Effect<R, E, B>): Effect<R, E, Pair<A, B>> = Effect { env ->
     coroutineScope {
-        val a = async { asFiber { unsafeRun(env) } }
-        val b = async { asFiber { that.unsafeRun(env) } }
+        val a = asyncFiber { unsafeRun(env) }
+        val b = asyncFiber { that.unsafeRun(env) }
         a.await() to b.await()
     }
 }
@@ -173,8 +178,8 @@ fun <R, E, A, B, C> Effect<R, E, A>.zipWithPar(that: Effect<R, E, B>, f: (A, B) 
  */
 fun <R, E, A> Effect<R, E, A>.race(that: Effect<R, E, A>): Effect<R, E, A> = Effect { env ->
     coroutineScope {
-        val left = async { asFiber { runToExit(env) } }
-        val right = async { asFiber { that.runToExit(env) } }
+        val left = asyncFiber { runToExit(env) }
+        val right = asyncFiber { that.runToExit(env) }
         val (first, other) = select<Pair<Exit<E, A>, Deferred<Exit<E, A>>>> {
             left.onAwait { it to right }
             right.onAwait { it to left }

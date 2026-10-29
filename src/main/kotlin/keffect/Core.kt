@@ -31,7 +31,7 @@ class Effect<in R, out E, out A> @PublishedApi internal constructor(
         fun <A> succeed(value: A): Effect<Any?, Nothing, A> = Effect { value }
 
         /** `Effect.fail` — an expected, typed failure. */
-        fun <E> fail(error: E): Effect<Any?, E, Nothing> = Effect { throw TypedFailure(error) }
+        fun <E> fail(error: E): Effect<Any?, E, Nothing> = Effect { raise(Cause.Fail(error)) }
 
         /** `Effect.die` — an unexpected defect. */
         fun die(defect: Throwable): Effect<Any?, Nothing, Nothing> = Effect { throw defect }
@@ -57,7 +57,7 @@ class Effect<in R, out E, out A> @PublishedApi internal constructor(
             } catch (c: CancellationException) {
                 throw c
             } catch (t: Throwable) {
-                throw TypedFailure(catch(t))
+                raise(Cause.Fail(catch(t)))
             }
         }
 
@@ -66,7 +66,7 @@ class Effect<in R, out E, out A> @PublishedApi internal constructor(
 
         /** Lift a nullable value, failing with [ifNull] when it is null. */
         fun <E, A : Any> fromNullable(value: A?, ifNull: () -> E): Effect<Any?, E, A> =
-            Effect { value ?: throw TypedFailure(ifNull()) }
+            Effect { value ?: raise(Cause.Fail(ifNull())) }
 
         fun sleep(duration: Duration): Effect<Any?, Nothing, Unit> = Effect { delay(duration) }
 
@@ -99,11 +99,6 @@ class Effect<in R, out E, out A> @PublishedApi internal constructor(
 typealias IO<E, A> = Effect<Any?, E, A>
 typealias UIO<A> = Effect<Any?, Nothing, A>
 
-/** Internal carrier for typed errors. Never escapes the library. Stackless on purpose. */
-@PublishedApi
-internal class TypedFailure(val error: Any?) : RuntimeException(null, null, false, false) {
-    override val message: String get() = "Unhandled typed failure: $error"
-}
 
 /** Why an effect failed. Mirrors Effect-TS `Cause`. */
 sealed interface Cause<out E> {
@@ -150,30 +145,78 @@ class FiberFailure(val effectCause: Cause<*>) : RuntimeException(
 )
 
 // ---------------------------------------------------------------------------
-// Internal plumbing between "exceptions" and Cause/Exit
+// Internal plumbing between "exceptions" and Cause/Exit.
+//
+// A running effect reports failure by throwing. This section is the only code that
+// knows how: [raise] turns a Cause into a throw, [exitOf] turns a throw back into
+// a Cause, and the round trip is lossless. Everything else speaks Cause/Exit.
+//  - Fail and Both travel inside a [CauseFailure],
+//  - Die is the defect itself, so it keeps its stack trace and type,
+//  - Interrupt is a CancellationException, because that is how coroutines cancel.
 // ---------------------------------------------------------------------------
 
-/** Run an effect and capture its outcome. Cancellation is rethrown (it is how interruption propagates). */
+/** Internal carrier for causes that are not plain throwables. Never escapes the library. Stackless on purpose. */
 @PublishedApi
-internal suspend fun <R, E, A> Effect<R, E, A>.runToExit(env: R): Exit<E, A> =
+internal class CauseFailure(val failure: Cause<*>) : RuntimeException(null, null, false, false) {
+    override val message: String get() = "Unhandled failure: ${failure.pretty()}"
+}
+
+/** Run [block] and capture its outcome. Cancellation is rethrown (it is how interruption propagates). */
+@PublishedApi
+internal suspend fun <E, A> exitOf(block: suspend () -> A): Exit<E, A> =
     try {
-        Exit.Success(unsafeRun(env))
-    } catch (f: TypedFailure) {
+        Exit.Success(block())
+    } catch (f: CauseFailure) {
         @Suppress("UNCHECKED_CAST")
-        Exit.Failure(Cause.Fail(f.error as E))
+        Exit.Failure(f.failure as Cause<E>)
     } catch (c: CancellationException) {
         throw c
     } catch (t: Throwable) {
         Exit.Failure(Cause.Die(t))
     }
 
+@PublishedApi
+internal suspend fun <R, E, A> Effect<R, E, A>.runToExit(env: R): Exit<E, A> = exitOf { unsafeRun(env) }
+
 /** Re-raise a cause inside a running effect. */
 @PublishedApi
 internal fun raise(cause: Cause<*>): Nothing = when (cause) {
-    is Cause.Fail -> throw TypedFailure(cause.error)
     is Cause.Die -> throw cause.defect
     Cause.Interrupt -> throw CancellationException("Interrupted")
-    is Cause.Both -> raise(cause.left)
+    is Cause.Fail, is Cause.Both -> throw CauseFailure(cause)
+}
+
+/**
+ * The primitive every error operator is built on: continue with [onFailure] or [onSuccess]
+ * depending on the outcome. Interruption is not a failure here; it keeps propagating.
+ */
+internal fun <R, E, E2, A, B> Effect<R, E, A>.foldCause(
+    onFailure: (Cause<E>) -> Effect<R, E2, B>,
+    onSuccess: (A) -> Effect<R, E2, B>,
+): Effect<R, E2, B> = Effect { env ->
+    when (val exit = runToExit(env)) {
+        is Exit.Success -> onSuccess(exit.value).unsafeRun(env)
+        is Exit.Failure -> onFailure(exit.cause).unsafeRun(env)
+    }
+}
+
+/** The first typed error in this cause, or the cause itself when it holds none (so it fits any error type). */
+internal fun <E> Cause<E>.failureOrCause(): Either<E, Cause<Nothing>> {
+    fun firstFail(c: Cause<E>): Cause.Fail<E>? = when (c) {
+        is Cause.Fail -> c
+        is Cause.Both -> firstFail(c.left) ?: firstFail(c.right)
+        else -> null
+    }
+    @Suppress("UNCHECKED_CAST")
+    return firstFail(this)?.let { Either.Left(it.error) } ?: Either.Right(this as Cause<Nothing>)
+}
+
+/** Map every typed error in this cause. */
+internal fun <E, E2> Cause<E>.mapFail(f: (E) -> E2): Cause<E2> = when (this) {
+    is Cause.Fail -> Cause.Fail(f(error))
+    is Cause.Die -> this
+    Cause.Interrupt -> Cause.Interrupt
+    is Cause.Both -> Cause.Both(left.mapFail(f), right.mapFail(f))
 }
 
 @PublishedApi
